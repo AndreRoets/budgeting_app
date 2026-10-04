@@ -49,9 +49,24 @@ class MonthSummary {
     this.creditSpent = 0,
     this.cardPayments = 0,
     this.adjustment = 0,
+    this.oneOffIncome = 0,
+    this.carriedOver = 0,
   });
 
   final double income;
+
+  /// The part of [income] that is one-time money, like a gift.
+  final double oneOffIncome;
+
+  /// Left over (or, when negative, overspent) in earlier periods and rolled
+  /// into this one. See [carriedInto].
+  final double carriedOver;
+
+  /// Income that comes in every period.
+  double get regularIncome => income - oneOffIncome;
+
+  /// All the money this period has to work with.
+  double get available => income + carriedOver;
 
   /// Part of [income] the user has marked as received this month.
   final double incomeReceived;
@@ -86,9 +101,10 @@ class MonthSummary {
   /// plus payments made to credit cards.
   double get fromIncome => cashSpent + cardPayments;
 
-  /// What is actually still available: income minus commitments and the money
-  /// that has really come out of it, plus any manual correction.
-  double get left => income - committed - fromIncome + adjustment;
+  /// What is actually still available: income and anything carried over,
+  /// minus commitments and the money that has really come out of it, plus any
+  /// manual correction.
+  double get left => available - committed - fromIncome + adjustment;
 
   /// Income not yet assigned to any bill, debt or spending budget.
   double get unallocated => income - committed - budgeted;
@@ -96,20 +112,46 @@ class MonthSummary {
   double get billsOutstanding => committed - billsPaid;
 }
 
+double _incomeIn(BudgetState s, DateTime month) =>
+    s.allIncomes.fold<double>(0, (a, i) => a + i.amountIn(month));
+
+double _committedIn(BudgetState s, DateTime month) =>
+    s.allBills.fold<double>(0, (a, b) => a + b.amountIn(month));
+
+/// What was left over (negative when overspent) across every period from
+/// [BudgetState.carryOverFrom] up to, but not including, [month].
+double carriedInto(BudgetState s, DateTime month) {
+  final from = s.carryOverFrom;
+  if (!s.carryOver || from == null) return 0;
+  final first = DateTime.parse('$from-01');
+  if (!first.isBefore(month)) return 0;
+  var total = 0.0;
+  for (var m = first; m.isBefore(month); m = DateTime(m.year, m.month + 1)) {
+    total += _incomeIn(s, m) - _committedIn(s, m) + s.leftAdjustmentFor(m);
+  }
+  // Money that left income in those periods: see [MonthSummary.fromIncome].
+  final start = s.periodStart(first), end = s.periodStart(month);
+  for (final t in s.txns) {
+    final day = DateTime(t.date.year, t.date.month, t.date.day);
+    if (day.isBefore(start) || !day.isBefore(end)) continue;
+    if (t.isPayment == onCreditCard(s, t)) total -= t.amount;
+  }
+  return total;
+}
+
 MonthSummary summarize(BudgetState s, DateTime month) {
-  final income = s.incomes
-      .where((i) => i.appliesTo(month))
-      .fold<double>(0, (a, i) => a + i.amount);
+  final income = _incomeIn(s, month);
 
   var bills = 0.0, debt = 0.0, paid = 0.0;
-  for (final b in s.bills) {
+  for (final b in s.allBills) {
+    final amount = b.amountIn(month);
     if (b.isDebt) {
-      debt += b.amount;
+      debt += amount;
     } else {
-      bills += b.amount;
+      bills += amount;
     }
     final rec = s.paidRecord(b, month);
-    if (rec != null) paid += rec.amount ?? b.amount;
+    if (rec != null) paid += rec.amount ?? amount;
   }
 
   final all = txnsInMonth(s, month);
@@ -130,9 +172,9 @@ MonthSummary summarize(BudgetState s, DateTime month) {
     for (final c in s.categories)
       CategoryTotals(
         category: c,
-        fixed: s.bills
+        fixed: s.allBills
             .where((b) => b.categoryId == c.id)
-            .fold<double>(0, (a, b) => a + b.amount),
+            .fold<double>(0, (a, b) => a + b.amountIn(month)),
         spent: inCategory(monthTxns, c.id),
         creditSpent: inCategory(creditTxns, c.id),
       ),
@@ -140,9 +182,13 @@ MonthSummary summarize(BudgetState s, DateTime month) {
 
   return MonthSummary(
     income: income,
-    incomeReceived: s.incomes
-        .where((i) => i.appliesTo(month) && s.receivedOn(i, month) != null)
-        .fold<double>(0, (a, i) => a + i.amount),
+    oneOffIncome: s.incomes
+        .where((i) => i.oneOffMonth != null)
+        .fold<double>(0, (a, i) => a + i.amountIn(month)),
+    carriedOver: carriedInto(s, month),
+    incomeReceived: s.allIncomes
+        .where((i) => s.receivedOn(i, month) != null)
+        .fold<double>(0, (a, i) => a + i.amountIn(month)),
     billsTotal: bills,
     debtTotal: debt,
     billsPaid: paid,
@@ -238,8 +284,7 @@ class MonthTrend {
   final DateTime month;
   final double income;
 
-  /// Bills and debt payments. These aren't stored per month, so this is the
-  /// current list applied to every month shown.
+  /// Bills and debt payments, as they were in that month.
   final double committed;
   final double spent;
 
@@ -248,28 +293,21 @@ class MonthTrend {
 }
 
 /// The [count] months ending at [end], oldest first.
-List<MonthTrend> monthlyTrend(BudgetState s, DateTime end, {int count = 6}) {
-  final committed = s.bills.fold<double>(0, (a, b) => a + b.amount);
-  return [
-    for (var i = count - 1; i >= 0; i--)
-      () {
-        final m = DateTime(end.year, end.month - i);
-        return MonthTrend(
-          month: m,
-          income: s.incomes
-              .where((x) => x.appliesTo(m))
-              .fold<double>(0, (a, x) => a + x.amount),
-          committed: committed,
-          // Money that left income: cash spending plus card payments. Credit
-          // card purchases are debt, so they only count once they are paid.
-          spent: () {
-            final sum = summarize(s, m);
-            return sum.fromIncome;
-          }(),
-        );
-      }(),
-  ];
-}
+List<MonthTrend> monthlyTrend(BudgetState s, DateTime end, {int count = 6}) => [
+      for (var i = count - 1; i >= 0; i--)
+        () {
+          final m = DateTime(end.year, end.month - i);
+          final sum = summarize(s, m);
+          return MonthTrend(
+            month: m,
+            income: sum.income,
+            committed: sum.committed,
+            // Money that left income: cash spending plus card payments. Credit
+            // card purchases are debt, so they only count once they are paid.
+            spent: sum.fromIncome,
+          );
+        }(),
+    ];
 
 class CategoryChange {
   const CategoryChange(this.category, this.current, this.previous);

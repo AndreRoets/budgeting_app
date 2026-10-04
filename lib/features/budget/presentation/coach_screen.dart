@@ -544,7 +544,7 @@ class _BufferSheetState extends ConsumerState<_BufferSheet> {
   @override
   Widget build(BuildContext context) {
     final s = ref.watch(budgetProvider);
-    final income = summarize(s, s.currentPeriod).income;
+    final income = summarize(s, s.currentPeriod).regularIncome;
     void set(double v) => setState(() => _amount.text = v.toStringAsFixed(2));
 
     return Form(

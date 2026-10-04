@@ -86,6 +86,14 @@ class _SettingsSheet extends ConsumerWidget {
         child: Text('Salary and pay day are set on the Budget tab, under Income.',
             style: Theme.of(context).textTheme.bodySmall),
       ),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        value: s.carryOver,
+        onChanged: n.setCarryOver,
+        title: const Text('Carry over what is left'),
+        subtitle: const Text(
+            'Money left at the end of a budget month is added to the next one, and overspending is taken off it.'),
+      ),
       gap,
       Text('Overview: spending highlight', style: label),
       const SizedBox(height: 4),

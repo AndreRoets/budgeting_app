@@ -24,8 +24,8 @@ class PlanScreen extends ConsumerWidget {
     final cur = s.currency;
 
     final incomes = s.incomes.where((i) => i.appliesTo(month)).toList();
-    final expenses = s.bills.where((b) => !b.isDebt).toList();
-    final debts = s.bills.where((b) => b.isDebt).toList();
+    final expenses = s.bills.where((b) => !b.isDebt && b.appliesTo(month)).toList();
+    final debts = s.bills.where((b) => b.isDebt && b.appliesTo(month)).toList();
     final creditCards = s.cards.where((c) => c.isCredit).toList();
 
     Widget add(String label, VoidCallback onTap) => TextButton.icon(
@@ -38,7 +38,10 @@ class PlanScreen extends ConsumerWidget {
         children: [
           const MonthBar(),
           SectionHeader('Income',
-              action: add('Add', () => showIncomeForm(context))),
+              action: Row(mainAxisSize: MainAxisSize.min, children: [
+                add('Extra', () => showExtraIncomeForm(context)),
+                add('Add', () => showIncomeForm(context)),
+              ])),
           Card(
             child: incomes.isEmpty
                 ? const EmptyHint(Icons.account_balance_wallet_outlined,

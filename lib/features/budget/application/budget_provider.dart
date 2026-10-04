@@ -57,6 +57,9 @@ class BudgetNotifier extends Notifier<BudgetState> {
     }
     var current = _withRecurring(loaded, DateTime.now());
     current = _withCoachBillRefreshed(current, DateTime.now());
+    if (current.carryOver && current.carryOverFrom == null) {
+      current = current.copyWith(carryOverFrom: monthKey(current.currentPeriod));
+    }
     if (!identical(current, loaded)) {
       prefs.setString(_storageKey, jsonEncode(current.toJson()));
     }
@@ -82,6 +85,10 @@ class BudgetNotifier extends Notifier<BudgetState> {
         for (final b in state.bills)
           b.categoryId == id ? b.copyWith(categoryId: otherCategoryId) : b,
       ],
+      pastBills: [
+        for (final b in state.pastBills)
+          b.categoryId == id ? b.copyWith(categoryId: otherCategoryId) : b,
+      ],
       txns: [for (final t in state.txns) t.withoutCategory(id)],
       recurring: [
         for (final r in state.recurring)
@@ -91,10 +98,58 @@ class BudgetNotifier extends Notifier<BudgetState> {
   }
 
   // Bills & debts
-  void saveBill(Bill b) =>
-      _set(state.copyWith(bills: _upsert(state.bills, b, (e) => e.id)));
-  void deleteBill(String id) =>
-      _set(state.copyWith(bills: state.bills.where((b) => b.id != id).toList()));
+  /// A new bill counts from the current period, or from [from] when that is
+  /// earlier. A changed amount counts from then on too, so the periods before
+  /// keep what they had.
+  void saveBill(Bill b, {DateTime? from}) {
+    final at = _editPeriod(state, from);
+    final old = state.bills.where((e) => e.id == b.id).firstOrNull;
+    final saved = old == null ? b.copyWith(startMonth: monthKey(at)) : old.edited(b, at);
+    _set(state.copyWith(bills: _upsert(state.bills, saved, (e) => e.id)));
+  }
+
+  void deleteBill(String id) => _set(_withoutBill(state, id));
+
+  /// The period a change takes effect in: the current one, or [from] when
+  /// that is earlier.
+  DateTime _editPeriod(BudgetState s, DateTime? from) {
+    final current = s.currentPeriod;
+    return from != null && from.isBefore(current) ? from : current;
+  }
+
+  String _lastPeriodKey(BudgetState s) {
+    final current = s.currentPeriod;
+    return monthKey(DateTime(current.year, current.month - 1));
+  }
+
+  /// [s] without the bill [id] from the current period on. A bill that counted
+  /// in earlier periods is kept in [BudgetState.pastBills] for those.
+  BudgetState _withoutBill(BudgetState s, String id) {
+    final b = s.bills.where((e) => e.id == id).firstOrNull;
+    if (b == null) return s;
+    final last = _lastPeriodKey(s);
+    final hadPast = b.startMonth == null || b.startMonth!.compareTo(last) <= 0;
+    return s.copyWith(
+      bills: s.bills.where((e) => e.id != id).toList(),
+      pastBills: hadPast ? [...s.pastBills, b.copyWith(endMonth: last)] : null,
+    );
+  }
+
+  /// A pay day change can rename the current period (say from October to
+  /// September). Whatever started in it, carry-over included, moves with it.
+  BudgetState _rekeyed(BudgetState before, BudgetState after) {
+    final was = monthKey(before.currentPeriod), now = monthKey(after.currentPeriod);
+    if (was == now) return after;
+    return after.copyWith(
+      bills: [
+        for (final b in after.bills) b.startMonth == was ? b.copyWith(startMonth: now) : b,
+      ],
+      incomes: [
+        for (final i in after.incomes) i.startMonth == was ? i.copyWith(startMonth: now) : i,
+      ],
+      carryOverFrom: after.carryOverFrom == was ? now : null,
+    );
+  }
 
 
   /// Records a payment made on [date]. For a debt with a known balance,
@@ -189,10 +244,59 @@ class BudgetNotifier extends Notifier<BudgetState> {
       received: {...state.received}..remove('${monthKey(month)}|${i.id}')));
 
   // Income
-  void saveIncome(Income i) =>
-      _set(state.copyWith(incomes: _upsert(state.incomes, i, (e) => e.id)));
-  void deleteIncome(String id) => _set(
-      state.copyWith(incomes: state.incomes.where((i) => i.id != id).toList()));
+  /// Regular income keeps its history the way bills do (see [saveBill]).
+  void saveIncome(Income i, {DateTime? from}) {
+    final old = state.incomes.where((e) => e.id == i.id).firstOrNull;
+    // The pay day being saved can itself move the current period.
+    final at = _editPeriod(
+        state.copyWith(incomes: _upsert(state.incomes, i, (e) => e.id)), from);
+    final saved = i.oneOffMonth != null
+        ? i
+        : old == null || old.oneOffMonth != null
+            ? i.copyWith(startMonth: monthKey(at))
+            : old.edited(i, at);
+    _set(_rekeyed(
+        state, state.copyWith(incomes: _upsert(state.incomes, saved, (e) => e.id))));
+  }
+
+  /// A regular income that counted in earlier periods is kept in
+  /// [BudgetState.pastIncomes] for those, with its received dates.
+  void deleteIncome(String id) {
+    final i = state.incomes.where((e) => e.id == id).firstOrNull;
+    if (i == null) return;
+    final last = _lastPeriodKey(state);
+    final hadPast = i.oneOffMonth == null &&
+        (i.startMonth == null || i.startMonth!.compareTo(last) <= 0);
+    _set(_rekeyed(
+      state,
+      state.copyWith(
+        incomes: state.incomes.where((e) => e.id != id).toList(),
+        pastIncomes: hadPast ? [...state.pastIncomes, i.copyWith(endMonth: last)] : null,
+        received: {
+          for (final e in state.received.entries)
+            if (!e.key.endsWith('|$id') ||
+                (hadPast && e.key.split('|').first.compareTo(last) <= 0))
+              e.key: e.value,
+        },
+      ),
+    ));
+  }
+
+  /// Money that has already arrived outside the usual income (a gift, a
+  /// refund): a one-time income in the period [date] falls in, marked as
+  /// received on that day.
+  void addExtraIncome(String name, double amount, DateTime date) {
+    final income = Income(
+      id: newId(),
+      name: name,
+      amount: amount,
+      oneOffMonth: monthKey(state.periodKey(date)),
+    );
+    _set(state.copyWith(
+      incomes: [...state.incomes, income],
+      received: {...state.received, '${income.oneOffMonth}|${income.id}': date},
+    ));
+  }
 
   // Transactions
   /// Saving spending that repays a debt also lowers that debt's balance; an
@@ -317,7 +421,14 @@ class BudgetNotifier extends Notifier<BudgetState> {
   void setFocusCategory(String? id) => _set(state.copyWith(focusCategoryId: id));
   void setPaceMode(int mode) => _set(state.copyWith(paceMode: mode));
   void setThemeMode(int mode) => _set(state.copyWith(themeMode: mode));
-  void setPeriodStartDay(int day) => _set(state.copyWith(periodStartDay: day));
+  void setPeriodStartDay(int day) =>
+      _set(_rekeyed(state, state.copyWith(periodStartDay: day)));
+
+  /// Whether leftover money rolls into the next period, counted from the
+  /// period it was first switched on in.
+  void setCarryOver(bool on) => _set(state.copyWith(
+      carryOver: on,
+      carryOverFrom: state.carryOverFrom ?? monthKey(state.currentPeriod)));
 
   /// Sets a manual correction to "left to spend" for [period], as a delta on
   /// top of what's calculated (see [BudgetState.leftAdjustmentFor]).
@@ -350,8 +461,7 @@ class BudgetNotifier extends Notifier<BudgetState> {
   }
 
   /// Removes the confirmed bill; it stops being tracked or shown.
-  void unconfirmCoachPlan() =>
-      _set(state.copyWith(bills: state.bills.where((b) => !b.isCoachExtra).toList()));
+  void unconfirmCoachPlan() => _set(_withoutBill(state, _coachBillId));
 
   /// Keeps an already-confirmed bill's amount and target in sync with the
   /// live plan - e.g. once a debt is paid off, the same bill moves on to
@@ -388,7 +498,8 @@ class BudgetNotifier extends Notifier<BudgetState> {
     final target = plan.debts.where((d) => d.id == targetId).firstOrNull;
     if (target == null) return null;
     final existing = s.bills.where((b) => b.isCoachExtra).firstOrNull;
-    return Bill(
+    final at = _editPeriod(s, month);
+    final bill = Bill(
       id: _coachBillId,
       name: 'Extra to ${target.name}',
       amount: plan.budget.extra,
@@ -398,5 +509,8 @@ class BudgetNotifier extends Notifier<BudgetState> {
       coachTargetIsCard: target.isCard,
       dueDay: existing?.dueDay ?? s.startDay,
     );
+    return existing == null
+        ? bill.copyWith(startMonth: monthKey(at))
+        : existing.edited(bill, at);
   }
 }

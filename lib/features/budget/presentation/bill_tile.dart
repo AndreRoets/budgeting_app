@@ -25,6 +25,7 @@ class BillTile extends ConsumerWidget {
     final month = ref.watch(selectedMonthProvider);
     final rec = s.paidRecord(bill, month);
     final paid = rec != null;
+    final amount = bill.amountIn(month);
 
     void toggle() {
       if (paid) {
@@ -39,7 +40,7 @@ class BillTile extends ConsumerWidget {
         rec.date == null ? 'Paid' : 'Paid ${shortDate(rec.date!)}'
       else if (bill.dueDay != null)
         'Due ${ordinal(bill.dueDay!)}',
-      if (paid && rec.amount != null && rec.amount != bill.amount)
+      if (paid && rec.amount != null && rec.amount != amount)
         money(rec.amount!, s.currency),
       if (bill.isCoachExtra) 'From Debt coach',
     ].join(' · ');
@@ -60,7 +61,7 @@ class BillTile extends ConsumerWidget {
       ),
       subtitle: subtitle.isEmpty ? null : Text(subtitle),
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-        Text(money(bill.amount, s.currency),
+        Text(money(amount, s.currency),
             style: const TextStyle(fontWeight: FontWeight.w700)),
         if (bill.isDebt && bill.debtBalance != null)
           PopupMenuButton(
@@ -148,7 +149,7 @@ class IncomeTile extends ConsumerWidget {
       title: Text(income.name),
       subtitle: Text(details),
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-        Text(money(income.amount, s.currency),
+        Text(money(income.amountIn(month), s.currency),
             style: const TextStyle(
                 fontWeight: FontWeight.w700, color: Semantic.good)),
         Checkbox(

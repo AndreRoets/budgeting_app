@@ -25,7 +25,8 @@ class DashboardScreen extends ConsumerWidget {
     final cur = s.currency;
     final theme = Theme.of(context);
 
-    final unpaid = s.bills.where((b) => !s.isPaid(b, month)).toList()
+    final unpaid =
+        s.bills.where((b) => b.appliesTo(month) && !s.isPaid(b, month)).toList()
       ..sort((a, b) => dueOrder(s.startDay, a.dueDay).compareTo(dueOrder(s.startDay, b.dueDay)));
     final withBudget = sum.categories.where((c) => c.budget > 0).toList();
     final isEmpty = s.incomes.isEmpty && s.bills.isEmpty && s.txns.isEmpty;
@@ -63,6 +64,14 @@ class DashboardScreen extends ConsumerWidget {
             paceMode: s.paceMode,
             hasOverride: s.hasLeftAdjustment(month),
             onAdjust: () => showLeftOverrideSheet(context),
+          ),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
+              onPressed: () => showExtraIncomeForm(context),
+              icon: const Icon(Icons.add_rounded),
+              label: const Text('Add extra income'),
+            ),
           ),
           _DebtCard(debt: totalDebt(s, month), cur: cur),
           if (s.goals.isNotEmpty) _GoalsCard(goals: s.goals, month: month, cur: cur),
@@ -148,8 +157,8 @@ class _HeroCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final brightness = Theme.of(context).brightness;
-    final used = sum.income <= 0 ? (sum.committed + sum.fromIncome > 0 ? 1.0 : 0.0)
-        : (sum.committed + sum.fromIncome) / sum.income;
+    final used = sum.available <= 0 ? (sum.committed + sum.fromIncome > 0 ? 1.0 : 0.0)
+        : (sum.committed + sum.fromIncome) / sum.available;
     final over = sum.left < 0;
     const on = AppTheme.onHero;
 
@@ -253,6 +262,21 @@ class _HeroCard extends StatelessWidget {
                 Expanded(
                   child: Text(
                       'Received ${money(sum.incomeReceived, cur)} of ${money(sum.income, cur)}',
+                      style: TextStyle(color: on.withValues(alpha: 0.8), fontSize: 13)),
+                ),
+              ]),
+            ),
+          if (sum.carriedOver != 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Icon(Icons.redo_rounded, size: 16, color: on.withValues(alpha: 0.8)),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                      sum.carriedOver > 0
+                          ? 'Includes ${money(sum.carriedOver, cur)} carried over from before'
+                          : '${money(-sum.carriedOver, cur)} overspent before has been taken off',
                       style: TextStyle(color: on.withValues(alpha: 0.8), fontSize: 13)),
                 ),
               ]),
@@ -397,7 +421,7 @@ class _Breakdown extends StatelessWidget {
     }
     final theme = Theme.of(context);
     final left = sum.left > 0 ? sum.left : 0.0;
-    final base = sum.income > 0 ? sum.income : sum.committed + sum.fromIncome;
+    final base = sum.available > 0 ? sum.available : sum.committed + sum.fromIncome;
     double pct(double v) => base > 0 ? v / base * 100 : 0;
     final shown = items.take(4).toList();
     final rest = items.length - shown.length;

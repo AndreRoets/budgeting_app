@@ -48,6 +48,41 @@ String newId() => DateTime.now().microsecondsSinceEpoch.toRadixString(36);
 String monthKey(DateTime d) =>
     '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}';
 
+String _prevKey(DateTime month) => monthKey(DateTime(month.year, month.month - 1));
+
+/// Whether the "yyyy-MM" period [key] is within [start] to [end] (null = open).
+bool _inMonths(String key, String? start, String? end) =>
+    (start == null || key.compareTo(start) >= 0) &&
+    (end == null || key.compareTo(end) <= 0);
+
+/// The amount that applied in period [key]: the entry of [earlier] with the
+/// first key on or after it, or the current [amount] when there is none.
+double _amountIn(String key, double amount, Map<String, double> earlier) {
+  String? best;
+  for (final k in earlier.keys) {
+    if (k.compareTo(key) >= 0 && (best == null || k.compareTo(best) < 0)) best = k;
+  }
+  return best == null ? amount : earlier[best]!;
+}
+
+/// [earlier] once the amount changes from period [from] on: periods before it
+/// keep [before], the amount they had. Empty when nothing started before [from].
+Map<String, double> _earlierAfterChange(
+    Map<String, double> earlier, double before, String? start, DateTime from) {
+  final prev = _prevKey(from);
+  if (start != null && start.compareTo(prev) > 0) return const {};
+  return {
+    for (final e in earlier.entries)
+      if (e.key.compareTo(prev) < 0) e.key: e.value,
+    prev: before,
+  };
+}
+
+Map<String, double> _earlierFromJson(Object? j) => {
+      for (final e in (j as Map? ?? const {}).entries)
+        e.key as String: (e.value as num).toDouble(),
+    };
+
 class Category {
   const Category({
     required this.id,
@@ -113,13 +148,43 @@ class Bill {
     this.isCoachExtra = false,
     this.coachTargetId,
     this.coachTargetIsCard = false,
+    this.earlier = const {},
+    this.startMonth,
+    this.endMonth,
   });
 
   final String id;
   final String name;
+
+  /// The current monthly amount. See [amountIn] for what a past period had.
   final double amount;
   final String categoryId;
   final bool isDebt;
+
+  /// What [amount] used to be: each key is the last "yyyy-MM" period an older
+  /// amount applied through.
+  final Map<String, double> earlier;
+
+  /// First and last "yyyy-MM" periods this counts in. No start means it always
+  /// has; an end is only set once it is deleted (see [BudgetState.pastBills]).
+  final String? startMonth;
+  final String? endMonth;
+
+  bool appliesTo(DateTime month) => _inMonths(monthKey(month), startMonth, endMonth);
+
+  /// The amount this was in the period [month], 0 when it did not apply.
+  double amountIn(DateTime month) =>
+      appliesTo(month) ? _amountIn(monthKey(month), amount, earlier) : 0;
+
+  /// [next] (this bill after an edit) with this bill's history kept. A changed
+  /// amount counts from period [from] on; earlier periods keep what they had.
+  Bill edited(Bill next, DateTime from) => next.copyWith(
+        startMonth: startMonth,
+        earlier: next.amount == amount
+            ? earlier
+            : _earlierAfterChange(earlier,
+                amountIn(DateTime(from.year, from.month - 1)), startMonth, from),
+      );
 
   /// Day of month (1-31) the payment is due.
   final int? dueDay;
@@ -147,6 +212,9 @@ class Bill {
     String? name,
     String? coachTargetId,
     bool? coachTargetIsCard,
+    Map<String, double>? earlier,
+    String? startMonth,
+    String? endMonth,
   }) =>
       Bill(
         id: id,
@@ -160,6 +228,9 @@ class Bill {
         isCoachExtra: isCoachExtra,
         coachTargetId: coachTargetId ?? this.coachTargetId,
         coachTargetIsCard: coachTargetIsCard ?? this.coachTargetIsCard,
+        earlier: earlier ?? this.earlier,
+        startMonth: startMonth ?? this.startMonth,
+        endMonth: endMonth ?? this.endMonth,
       );
 
   Map<String, dynamic> toJson() => {
@@ -174,6 +245,9 @@ class Bill {
         'isCoachExtra': isCoachExtra,
         'coachTargetId': coachTargetId,
         'coachTargetIsCard': coachTargetIsCard,
+        'earlier': earlier,
+        'startMonth': startMonth,
+        'endMonth': endMonth,
       };
 
   factory Bill.fromJson(Map<String, dynamic> j) => Bill(
@@ -188,6 +262,9 @@ class Bill {
         isCoachExtra: j['isCoachExtra'] as bool? ?? false,
         coachTargetId: j['coachTargetId'] as String?,
         coachTargetIsCard: j['coachTargetIsCard'] as bool? ?? false,
+        earlier: _earlierFromJson(j['earlier']),
+        startMonth: j['startMonth'] as String?,
+        endMonth: j['endMonth'] as String?,
       );
 }
 
@@ -198,11 +275,22 @@ class Income {
     required this.amount,
     this.oneOffMonth,
     this.payDay,
+    this.earlier = const {},
+    this.startMonth,
+    this.endMonth,
   });
 
   final String id;
   final String name;
+
+  /// The current amount. See [amountIn] for what a past period had.
   final double amount;
+
+  /// Amount history and the periods a regular income counts in, exactly as
+  /// for [Bill.earlier], [Bill.startMonth] and [Bill.endMonth].
+  final Map<String, double> earlier;
+  final String? startMonth;
+  final String? endMonth;
 
   /// "yyyy-MM" when this is a one-time payment; null means every month.
   final String? oneOffMonth;
@@ -210,8 +298,39 @@ class Income {
   /// Day of month (1-31) this income normally arrives.
   final int? payDay;
 
-  bool appliesTo(DateTime month) =>
-      oneOffMonth == null || oneOffMonth == monthKey(month);
+  bool appliesTo(DateTime month) => oneOffMonth != null
+      ? oneOffMonth == monthKey(month)
+      : _inMonths(monthKey(month), startMonth, endMonth);
+
+  /// The amount this was in the period [month], 0 when it did not apply.
+  double amountIn(DateTime month) =>
+      appliesTo(month) ? _amountIn(monthKey(month), amount, earlier) : 0;
+
+  /// [next] (this income after an edit) with this income's history kept. A
+  /// changed amount counts from period [from] on.
+  Income edited(Income next, DateTime from) => next.copyWith(
+        startMonth: startMonth,
+        earlier: next.amount == amount
+            ? earlier
+            : _earlierAfterChange(earlier,
+                amountIn(DateTime(from.year, from.month - 1)), startMonth, from),
+      );
+
+  Income copyWith({
+    Map<String, double>? earlier,
+    String? startMonth,
+    String? endMonth,
+  }) =>
+      Income(
+        id: id,
+        name: name,
+        amount: amount,
+        oneOffMonth: oneOffMonth,
+        payDay: payDay,
+        earlier: earlier ?? this.earlier,
+        startMonth: startMonth ?? this.startMonth,
+        endMonth: endMonth ?? this.endMonth,
+      );
 
   Map<String, dynamic> toJson() => {
         'id': id,
@@ -219,6 +338,9 @@ class Income {
         'amount': amount,
         'oneOffMonth': oneOffMonth,
         'payDay': payDay,
+        'earlier': earlier,
+        'startMonth': startMonth,
+        'endMonth': endMonth,
       };
 
   factory Income.fromJson(Map<String, dynamic> j) => Income(
@@ -227,6 +349,9 @@ class Income {
         amount: (j['amount'] as num).toDouble(),
         oneOffMonth: j['oneOffMonth'] as String?,
         payDay: j['payDay'] as int?,
+        earlier: _earlierFromJson(j['earlier']),
+        startMonth: j['startMonth'] as String?,
+        endMonth: j['endMonth'] as String?,
       );
 }
 
@@ -594,11 +719,30 @@ class BudgetState {
     this.leftAdjustments = const {},
     this.coachStrategy = -1,
     this.coachPriorityDebtId,
+    this.pastBills = const [],
+    this.pastIncomes = const [],
+    this.carryOver = true,
+    this.carryOverFrom,
   });
 
   final List<Category> categories;
   final List<Bill> bills;
   final List<Income> incomes;
+
+  /// Deleted bills and regular incomes, kept so the periods they counted in
+  /// still add up. Each has an end month.
+  final List<Bill> pastBills;
+  final List<Income> pastIncomes;
+
+  /// Whether what is left (or overspent) in one period rolls into the next.
+  final bool carryOver;
+
+  /// The first "yyyy-MM" period whose leftover is carried on. Null until the
+  /// app first runs with carry-over, so older periods are never rolled in.
+  final String? carryOverFrom;
+
+  List<Bill> get allBills => [...bills, ...pastBills];
+  List<Income> get allIncomes => [...incomes, ...pastIncomes];
   final List<PaymentCard> cards;
   final List<Txn> txns;
 
@@ -678,6 +822,10 @@ class BudgetState {
     Map<String, double>? leftAdjustments,
     int? coachStrategy,
     Object? coachPriorityDebtId = _unset,
+    List<Bill>? pastBills,
+    List<Income>? pastIncomes,
+    bool? carryOver,
+    String? carryOverFrom,
   }) =>
       BudgetState(
         categories: categories ?? this.categories,
@@ -703,6 +851,10 @@ class BudgetState {
         coachPriorityDebtId: identical(coachPriorityDebtId, _unset)
             ? this.coachPriorityDebtId
             : coachPriorityDebtId as String?,
+        pastBills: pastBills ?? this.pastBills,
+        pastIncomes: pastIncomes ?? this.pastIncomes,
+        carryOver: carryOver ?? this.carryOver,
+        carryOverFrom: carryOverFrom ?? this.carryOverFrom,
       );
 
   Map<String, dynamic> toJson() => {
@@ -725,6 +877,10 @@ class BudgetState {
         'leftAdjustments': leftAdjustments,
         'coachStrategy': coachStrategy,
         'coachPriorityDebtId': coachPriorityDebtId,
+        'pastBills': pastBills.map((e) => e.toJson()).toList(),
+        'pastIncomes': pastIncomes.map((e) => e.toJson()).toList(),
+        'carryOver': carryOver,
+        'carryOverFrom': carryOverFrom,
       };
 
   factory BudgetState.fromJson(Map<String, dynamic> j) {
@@ -769,6 +925,16 @@ class BudgetState {
       },
       coachStrategy: (j['coachStrategy'] as int?) ?? -1,
       coachPriorityDebtId: j['coachPriorityDebtId'] as String?,
+      pastBills: [
+        for (final e in (j['pastBills'] as List? ?? const []))
+          Bill.fromJson(Map<String, dynamic>.from(e as Map)),
+      ],
+      pastIncomes: [
+        for (final e in (j['pastIncomes'] as List? ?? const []))
+          Income.fromJson(Map<String, dynamic>.from(e as Map)),
+      ],
+      carryOver: j['carryOver'] as bool? ?? true,
+      carryOverFrom: j['carryOverFrom'] as String?,
     );
   }
 

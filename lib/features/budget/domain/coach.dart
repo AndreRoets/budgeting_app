@@ -101,10 +101,10 @@ class CoachBudget {
   /// one-off manual correction the user made there.
   final double leftToSpend;
 
-  /// The same figure, but without a one-off manual correction: what a typical
-  /// period looks like. A correction fixes up a period already under way, so
-  /// it should not decide what the whole future payoff plan can afford - only
-  /// this period's own numbers should.
+  /// The same figure, but without a one-off manual correction, one-time
+  /// income (a gift) or money carried over from earlier periods: what a
+  /// typical period looks like. Those only help this period, so they should
+  /// not decide what the whole future payoff plan can afford.
   final double steadyLeftToSpend;
 
   /// Minimum payments on credit cards, which "left to spend" does not cover.
@@ -159,9 +159,10 @@ CoachBudget coachBudget(
   final coachBill = s.bills.where((b) => b.isCoachExtra).firstOrNull;
   return CoachBudget(
     leftToSpend: sum.left,
-    steadyLeftToSpend: sum.left - sum.adjustment,
+    steadyLeftToSpend:
+        sum.left - sum.adjustment - sum.oneOffIncome - sum.carriedOver,
     cardMinimums: mins,
-    buffer: chosen ?? sum.income * defaultBufferShare,
+    buffer: chosen ?? sum.regularIncome * defaultBufferShare,
     bufferIsDefault: chosen == null,
     goalSavings: goalsSavingsNeeded(s.goals, month, DateTime.now()),
     share: coachShares[level],

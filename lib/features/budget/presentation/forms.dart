@@ -85,6 +85,22 @@ class _FormShell extends StatelessWidget {
 
 String? _required(String? v) => (v ?? '').trim().isEmpty ? 'Required' : null;
 
+/// Tells the user an edited amount leaves earlier months alone.
+class _AmountChangeNote extends ConsumerWidget {
+  const _AmountChangeNote();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final s = ref.watch(budgetProvider);
+    final month = ref.watch(selectedMonthProvider);
+    final from = month.isBefore(s.currentPeriod) ? month : s.currentPeriod;
+    return Text(
+      'A new amount counts from ${s.label(from)} on. Earlier months keep the old one.',
+      style: Theme.of(context).textTheme.bodySmall,
+    );
+  }
+}
+
 // ---------------------------------------------------------------- Bill/debt
 
 Future<void> showBillForm(BuildContext context, {Bill? bill, bool isDebt = false}) =>
@@ -146,7 +162,7 @@ class _BillFormState extends ConsumerState<_BillForm> {
               dueDay: int.tryParse(_due.text.trim()),
               debtBalance: debt ? parseAmount(_balance.text) : null,
               interestRate: debt ? parseAmount(_apr.text) : null,
-            ));
+            ), from: ref.read(selectedMonthProvider));
         Navigator.pop(context);
       },
       children: [
@@ -160,6 +176,7 @@ class _BillFormState extends ConsumerState<_BillForm> {
           validator: _required,
         ),
         AmountField(controller: _amount, label: debt ? 'Monthly payment' : 'Monthly amount'),
+        if (widget.bill != null) const _AmountChangeNote(),
         if (debt)
           AmountField(
               controller: _balance,
@@ -244,7 +261,7 @@ class _IncomeFormState extends ConsumerState<_IncomeForm> {
               amount: parseAmount(_amount.text)!,
               oneOffMonth: _oneOff ? (widget.income?.oneOffMonth ?? monthKey(month)) : null,
               payDay: int.tryParse(_payDay.text.trim()),
-            ));
+            ), from: month);
         Navigator.pop(context);
       },
       children: [
@@ -257,6 +274,7 @@ class _IncomeFormState extends ConsumerState<_IncomeForm> {
           validator: _required,
         ),
         AmountField(controller: _amount),
+        if (widget.income != null && !_oneOff) const _AmountChangeNote(),
         TextFormField(
           controller: _payDay,
           keyboardType: TextInputType.number,
@@ -282,6 +300,78 @@ class _IncomeFormState extends ConsumerState<_IncomeForm> {
           ],
           selected: {_oneOff},
           onSelectionChanged: (s) => setState(() => _oneOff = s.first),
+        ),
+      ],
+    );
+  }
+}
+
+// ------------------------------------------------------------- Extra income
+
+/// Quick entry for one-time money that has already arrived, like a gift.
+Future<void> showExtraIncomeForm(BuildContext context) =>
+    showFormSheet(context, const _ExtraIncomeForm());
+
+class _ExtraIncomeForm extends ConsumerStatefulWidget {
+  const _ExtraIncomeForm();
+
+  @override
+  ConsumerState<_ExtraIncomeForm> createState() => _ExtraIncomeFormState();
+}
+
+class _ExtraIncomeFormState extends ConsumerState<_ExtraIncomeForm> {
+  final _key = GlobalKey<FormState>();
+  final _amount = TextEditingController();
+  final _name = TextEditingController();
+  DateTime _date = DateTime.now();
+
+  @override
+  void dispose() {
+    _amount.dispose();
+    _name.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = ref.watch(budgetProvider);
+    return _FormShell(
+      title: 'Add extra income',
+      formKey: _key,
+      onSave: () {
+        ref.read(budgetProvider.notifier).addExtraIncome(
+              _name.text.trim().isEmpty ? 'Extra income' : _name.text.trim(),
+              parseAmount(_amount.text)!,
+              _date,
+            );
+        Navigator.pop(context);
+      },
+      children: [
+        AmountField(controller: _amount, autofocus: true),
+        TextFormField(
+          controller: _name,
+          textCapitalization: TextCapitalization.sentences,
+          decoration: const InputDecoration(
+              labelText: 'Where from (e.g. Gift from Gran)',
+              border: OutlineInputBorder()),
+        ),
+        OutlinedButton.icon(
+          icon: const Icon(Icons.event_rounded),
+          label: Text('Received on ${dayLabel(_date)}'),
+          style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(52)),
+          onPressed: () async {
+            final d = await showDatePicker(
+              context: context,
+              initialDate: _date,
+              firstDate: DateTime(2000),
+              lastDate: DateTime(2100),
+            );
+            if (d != null) setState(() => _date = d);
+          },
+        ),
+        Text(
+          'Added to what you have left to spend in ${s.label(s.periodKey(_date))}.',
+          style: Theme.of(context).textTheme.bodySmall,
         ),
       ],
     );
@@ -1110,7 +1200,7 @@ class _BillPaymentForm extends ConsumerStatefulWidget {
 class _BillPaymentFormState extends ConsumerState<_BillPaymentForm> {
   final _key = GlobalKey<FormState>();
   late final _amount =
-      TextEditingController(text: widget.bill.amount.toStringAsFixed(2));
+      TextEditingController(text: widget.bill.amountIn(widget.month).toStringAsFixed(2));
   late DateTime _date = dateInPeriod(ref.read(budgetProvider).startDay, widget.month,
       widget.bill.dueDay, DateTime.now());
   bool _reduce = true;
